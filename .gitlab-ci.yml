@@ -1,0 +1,53 @@
+stages:
+  - syntax_check
+  - package
+  - deploy
+
+variables:
+  # Lambdaコードが置かれているディレクトリ
+  LAMBDA_SRC_DIR: "lambda"
+  # アップロード先のS3バケット名(実際の値に変更してください)
+  S3_BUCKET: "my-lambda-bucket"
+  # S3バケット内のアップロード先プレフィックス(末尾は/で終える)
+  S3_PREFIX: "lambda/"
+  # zip化したLambdaパッケージの出力先ファイル名
+  PACKAGE_NAME: "lambda.zip"
+
+# Pythonの構文チェック(py_compileで全.pyファイルをコンパイルしてエラー検出)
+syntax_check:
+  stage: syntax_check
+  image: python:${PYTHON_VERSION}-slim
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  script:
+    - echo "Checking Python syntax in ${LAMBDA_SRC_DIR}..."
+    - python -m py_compile $(find "${LAMBDA_SRC_DIR}" -name "*.py")
+
+# 構文チェック成功後、Lambdaコードをzip化してアーティファクトとして渡す
+package:
+  stage: package
+  image: python:${PYTHON_VERSION}-slim
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  needs:
+    - syntax_check
+  script:
+    - echo "Packaging ${LAMBDA_SRC_DIR} into ${PACKAGE_NAME}..."
+    - apt-get update -qq && apt-get install -y -qq zip
+    - cd "${LAMBDA_SRC_DIR}" && zip -r "../${PACKAGE_NAME}" .
+  artifacts:
+    paths:
+      - "${PACKAGE_NAME}"
+    expire_in: 1 hour
+
+# zip化が成功した場合のみS3へアップロード
+deploy_to_s3:
+  stage: deploy
+  image: amazon/aws-cli:2.17.0
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  needs:
+    - package
+  script:
+    - echo "Uploading ${PACKAGE_NAME} to s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}..."
+    - aws s3 cp "${PACKAGE_NAME}" "s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}"
