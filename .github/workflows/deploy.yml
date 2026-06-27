@@ -1,0 +1,60 @@
+name: Lambda Deploy
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  # Lambdaコードが置かれているディレクトリ
+  LAMBDA_SRC_DIR: lambda
+  # zip化したLambdaパッケージの出力先ファイル名
+  PACKAGE_NAME: lambda.zip
+  # アップロード先のS3バケット名・プレフィックス
+  S3_BUCKET: kashi-lambda2
+  S3_PREFIX: ${{ vars.S3_PREFIX }}
+  AWS_REGION: ap-northeast-1
+
+jobs:
+  syntax_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ vars.PYTHON_VERSION }}
+      - name: Check Python syntax
+        run: |
+          echo "Checking Python syntax in ${LAMBDA_SRC_DIR}..."
+          python -m py_compile $(find "${LAMBDA_SRC_DIR}" -name "*.py")
+
+  package:
+    runs-on: ubuntu-latest
+    needs: syntax_check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zip Lambda package
+        run: |
+          echo "Packaging ${LAMBDA_SRC_DIR} into ${PACKAGE_NAME}..."
+          cd "${LAMBDA_SRC_DIR}" && zip -r "../${PACKAGE_NAME}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-package
+          path: ${{ env.PACKAGE_NAME }}
+          retention-days: 1
+
+  deploy_to_s3:
+    runs-on: ubuntu-latest
+    needs: package
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lambda-package
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Upload to S3
+        run: |
+          echo "Uploading ${PACKAGE_NAME} to s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}..."
+          aws s3 cp "${PACKAGE_NAME}" "s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}"
