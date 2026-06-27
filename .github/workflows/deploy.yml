@@ -5,10 +5,10 @@ on:
     branches: [ main ]
 
 env:
-  # Lambdaコードが置かれているディレクトリ
-  LAMBDA_SRC_DIR: lambda
-  # zip化したLambdaパッケージの出力先ファイル名
-  PACKAGE_NAME: lambda.zip
+  # Lambdaコードが置かれているディレクトリのパターン(lambda, lambda_2, ... を自動検出)
+  LAMBDA_SRC_PATTERN: lambda*
+  # zip化したLambdaパッケージの出力先ディレクトリ
+  DIST_DIR: dist
   # アップロード先のS3バケット名・プレフィックス
   S3_BUCKET: kashi-lambda2
   S3_PREFIX: ${{ vars.S3_PREFIX }}
@@ -24,31 +24,62 @@ jobs:
           python-version: ${{ vars.PYTHON_VERSION }}
       - name: Check Python syntax
         run: |
-          echo "Checking Python syntax in ${LAMBDA_SRC_DIR}..."
-          python -m py_compile $(find "${LAMBDA_SRC_DIR}" -name "*.py")
+          for dir in ${LAMBDA_SRC_PATTERN}/; do
+            echo "Checking Python syntax in ${dir}..."
+            python -m py_compile $(find "${dir}" -name "*.py")
+          done
 
   package:
     runs-on: ubuntu-latest
     needs: syntax_check
+    outputs:
+      changed: ${{ steps.changes.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
-      - name: Zip Lambda package
+        with:
+          fetch-depth: 0
+      - name: Detect changed Lambda directories
+        id: changes
         run: |
-          echo "Packaging ${LAMBDA_SRC_DIR} into ${PACKAGE_NAME}..."
-          cd "${LAMBDA_SRC_DIR}" && zip -r "../${PACKAGE_NAME}" .
+          if [ -z "${{ github.event.before }}" ] || [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "比較対象の前回コミットがないため、全Lambdaディレクトリを対象にします。"
+            CHANGED_DIRS=$(for dir in ${LAMBDA_SRC_PATTERN}/; do basename "${dir}"; done)
+          else
+            CHANGED_DIRS=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- ${LAMBDA_SRC_PATTERN} | cut -d/ -f1 | sort -u)
+          fi
+          if [ -z "${CHANGED_DIRS}" ]; then
+            echo "Lambdaディレクトリに変更がないため、パッケージをスキップします。"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "CHANGED_DIRS<<EOF" >> "$GITHUB_ENV"
+            echo "${CHANGED_DIRS}" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+          fi
+      - name: Zip changed Lambda packages
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          mkdir -p "${DIST_DIR}"
+          for name in ${CHANGED_DIRS}; do
+            echo "Packaging ${name} into ${DIST_DIR}/${name}.zip..."
+            (cd "${name}" && zip -r "../${DIST_DIR}/${name}.zip" .)
+          done
       - uses: actions/upload-artifact@v4
+        if: steps.changes.outputs.changed == 'true'
         with:
           name: lambda-package
-          path: ${{ env.PACKAGE_NAME }}
+          path: ${{ env.DIST_DIR }}/
           retention-days: 1
 
   deploy_to_s3:
     runs-on: ubuntu-latest
     needs: package
+    if: needs.package.outputs.changed == 'true'
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: lambda-package
+          path: ${{ env.DIST_DIR }}
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -56,5 +87,8 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: Upload to S3
         run: |
-          echo "Uploading ${PACKAGE_NAME} to s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}..."
-          aws s3 cp "${PACKAGE_NAME}" "s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}"
+          for f in "${DIST_DIR}"/*.zip; do
+            name=$(basename "${f}")
+            echo "Uploading ${name} to s3://${S3_BUCKET}/${S3_PREFIX}${name}..."
+            aws s3 cp "${f}" "s3://${S3_BUCKET}/${S3_PREFIX}${name}"
+          done
