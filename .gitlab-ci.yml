@@ -4,26 +4,31 @@ stages:
   - deploy
 
 variables:
-  # Lambdaコードが置かれているディレクトリ
-  LAMBDA_SRC_DIR: "lambda"
+  # Lambdaコードが置かれているディレクトリのパターン(lambda, lambda_2, ... を自動検出)
+  LAMBDA_SRC_PATTERN: "lambda*"
   # アップロード先のS3バケット名(実際の値に変更してください)
   S3_BUCKET: "my-lambda-bucket"
   # S3バケット内のアップロード先プレフィックス(末尾は/で終える)
   S3_PREFIX: "lambda/"
-  # zip化したLambdaパッケージの出力先ファイル名
-  PACKAGE_NAME: "lambda.zip"
+  # zip化したLambdaパッケージの出力先ディレクトリ
+  DIST_DIR: "dist"
+  # 差分検出のためフルコミット履歴を取得
+  GIT_DEPTH: "0"
 
-# Pythonの構文チェック(py_compileで全.pyファイルをコンパイルしてエラー検出)
+# Pythonの構文チェック(py_compileで対象ディレクトリ全ての.pyファイルをコンパイルしてエラー検出)
 syntax_check:
   stage: syntax_check
   image: python:${PYTHON_VERSION}-slim
   rules:
     - if: '$CI_COMMIT_BRANCH == "master"'
   script:
-    - echo "Checking Python syntax in ${LAMBDA_SRC_DIR}..."
-    - python -m py_compile $(find "${LAMBDA_SRC_DIR}" -name "*.py")
+    - |
+      for dir in ${LAMBDA_SRC_PATTERN}/; do
+        echo "Checking Python syntax in ${dir}..."
+        python -m py_compile $(find "${dir}" -name "*.py")
+      done
 
-# 構文チェック成功後、Lambdaコードをzip化してアーティファクトとして渡す
+# 構文チェック成功後、前回コミットと比較して変更があったLambdaディレクトリのみzip化
 package:
   stage: package
   image: python:${PYTHON_VERSION}-slim
@@ -32,15 +37,29 @@ package:
   needs:
     - syntax_check
   script:
-    - echo "Packaging ${LAMBDA_SRC_DIR} into ${PACKAGE_NAME}..."
-    - apt-get update -qq && apt-get install -y -qq zip
-    - cd "${LAMBDA_SRC_DIR}" && zip -r "../${PACKAGE_NAME}" .
+    - apt-get update -qq && apt-get install -y -qq zip git
+    - mkdir -p "${DIST_DIR}"
+    - |
+      if [ -z "${CI_COMMIT_BEFORE_SHA}" ] || [ "${CI_COMMIT_BEFORE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+        echo "比較対象の前回コミットがないため、全Lambdaディレクトリをパッケージします。"
+        CHANGED_DIRS=$(for dir in ${LAMBDA_SRC_PATTERN}/; do basename "${dir}"; done)
+      else
+        CHANGED_DIRS=$(git diff --name-only "${CI_COMMIT_BEFORE_SHA}" "${CI_COMMIT_SHA}" -- ${LAMBDA_SRC_PATTERN} | cut -d/ -f1 | sort -u)
+      fi
+      if [ -z "${CHANGED_DIRS}" ]; then
+        echo "Lambdaディレクトリに変更がないため、パッケージをスキップします。"
+        exit 0
+      fi
+      for name in ${CHANGED_DIRS}; do
+        echo "Packaging ${name} into ${DIST_DIR}/${name}.zip..."
+        (cd "${name}" && zip -r "../${DIST_DIR}/${name}.zip" .)
+      done
   artifacts:
     paths:
-      - "${PACKAGE_NAME}"
+      - "${DIST_DIR}/"
     expire_in: 1 hour
 
-# zip化が成功した場合のみS3へアップロード
+# パッケージが作成された(=変更があった)Lambdaのzipのみをすべてアップロード
 deploy_to_s3:
   stage: deploy
   image: amazon/aws-cli:2.17.0
@@ -49,5 +68,13 @@ deploy_to_s3:
   needs:
     - package
   script:
-    - echo "Uploading ${PACKAGE_NAME} to s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}..."
-    - aws s3 cp "${PACKAGE_NAME}" "s3://${S3_BUCKET}/${S3_PREFIX}${PACKAGE_NAME}"
+    - |
+      if [ ! -d "${DIST_DIR}" ] || [ -z "$(ls -A "${DIST_DIR}" 2>/dev/null)" ]; then
+        echo "アップロード対象がないため、デプロイをスキップします。"
+        exit 0
+      fi
+      for f in "${DIST_DIR}"/*.zip; do
+        name=$(basename "${f}")
+        echo "Uploading ${name} to s3://${S3_BUCKET}/${S3_PREFIX}${name}..."
+        aws s3 cp "${f}" "s3://${S3_BUCKET}/${S3_PREFIX}${name}"
+      done
