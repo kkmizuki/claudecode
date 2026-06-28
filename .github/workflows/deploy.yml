@@ -5,8 +5,8 @@ on:
     branches: [ main ]
 
 env:
-  # Lambdaコードが置かれているディレクトリのパターン(lambda, lambda_2, ... を自動検出)
-  LAMBDA_SRC_PATTERN: lambda*
+  # Lambdaのエントリーポイントとなるファイル名(このファイルがあるディレクトリを1関数として検出)
+  LAMBDA_ENTRY_FILE: lambda_function.py
   # zip化したLambdaパッケージの出力先ディレクトリ
   DIST_DIR: dist
   # アップロード先のS3バケット名・プレフィックス
@@ -24,7 +24,8 @@ jobs:
           python-version: ${{ vars.PYTHON_VERSION }}
       - name: Check Python syntax
         run: |
-          for dir in ${LAMBDA_SRC_PATTERN}/; do
+          for entry in $(find . -name "${LAMBDA_ENTRY_FILE}"); do
+            dir=$(dirname "${entry}")
             echo "Checking Python syntax in ${dir}..."
             python -m py_compile $(find "${dir}" -name "*.py")
           done
@@ -41,11 +42,17 @@ jobs:
       - name: Detect changed Lambda directories
         id: changes
         run: |
+          LAMBDA_DIRS=$(find . -name "${LAMBDA_ENTRY_FILE}" -exec dirname {} \; | sed 's|^\./||')
           if [ -z "${{ github.event.before }}" ] || [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
             echo "比較対象の前回コミットがないため、全Lambdaディレクトリを対象にします。"
-            CHANGED_DIRS=$(for dir in ${LAMBDA_SRC_PATTERN}/; do basename "${dir}"; done)
+            CHANGED_DIRS="${LAMBDA_DIRS}"
           else
-            CHANGED_DIRS=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- ${LAMBDA_SRC_PATTERN} | cut -d/ -f1 | sort -u)
+            CHANGED_DIRS=""
+            for dir in ${LAMBDA_DIRS}; do
+              if [ -n "$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- "${dir}")" ]; then
+                CHANGED_DIRS="${CHANGED_DIRS} ${dir}"
+              fi
+            done
           fi
           if [ -z "${CHANGED_DIRS}" ]; then
             echo "Lambdaディレクトリに変更がないため、パッケージをスキップします。"
@@ -60,9 +67,11 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         run: |
           mkdir -p "${DIST_DIR}"
-          for name in ${CHANGED_DIRS}; do
-            echo "Packaging ${name} into ${DIST_DIR}/${name}.zip..."
-            (cd "${name}" && zip -r "../${DIST_DIR}/${name}.zip" .)
+          DIST_DIR_ABS="$(pwd)/${DIST_DIR}"
+          for dir in ${CHANGED_DIRS}; do
+            name=$(basename "${dir}")
+            echo "Packaging ${dir} into ${DIST_DIR}/${name}.zip..."
+            (cd "${dir}" && zip -r "${DIST_DIR_ABS}/${name}.zip" .)
           done
       - uses: actions/upload-artifact@v4
         if: steps.changes.outputs.changed == 'true'
