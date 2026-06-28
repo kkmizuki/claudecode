@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 にアップロードされた Lambda コード(zip)を参照して Lambda 関数を作成するテンプレート。
+
+Parameters:
+  S3Bucket:
+    Type: String
+    Description: Lambda コードの zip が置かれている S3 バケット名
+    Default: kashi-lambda2
+
+  S3Prefix:
+    Type: String
+    Description: S3 バケット内の Lambda コード格納先プレフィックス（指定する場合は末尾を / で終える）
+    Default: ''
+
+  Runtime:
+    Type: String
+    Description: Lambda ランタイム
+    Default: python3.12
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda
+      Runtime: !Ref Runtime
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Sub "${S3Prefix}lambda.zip"
+
+  Lambda2Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda_2
+      Runtime: !Ref Runtime
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Sub "${S3Prefix}lambda_2.zip"
+
+Outputs:
+  LambdaFunctionArn:
+    Description: lambda 関数の ARN
+    Value: !GetAtt LambdaFunction.Arn
+
+  Lambda2FunctionArn:
+    Description: lambda_2 関数の ARN
+    Value: !GetAtt Lambda2Function.Arn
