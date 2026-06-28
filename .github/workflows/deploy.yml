@@ -3,6 +3,8 @@ name: Lambda Deploy
 on:
   push:
     branches: [ main ]
+  # 手動実行(差分検出をスキップし、検出対象の全Lambdaディレクトリをデプロイ)
+  workflow_dispatch: {}
 
 env:
   # Lambdaのエントリーポイントとなるファイル名(このファイルがあるディレクトリを1関数として検出)
