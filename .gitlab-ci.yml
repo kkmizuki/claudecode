@@ -4,8 +4,8 @@ stages:
   - deploy
 
 variables:
-  # Lambdaコードが置かれているディレクトリのパターン(lambda, lambda_2, ... を自動検出)
-  LAMBDA_SRC_PATTERN: "lambda*"
+  # Lambdaのエントリーポイントとなるファイル名(このファイルがあるディレクトリを1関数として検出)
+  LAMBDA_ENTRY_FILE: "lambda_function.py"
   # アップロード先のS3バケット名(実際の値に変更してください)
   S3_BUCKET: "my-lambda-bucket"
   # S3バケット内のアップロード先プレフィックス(末尾は/で終える)
@@ -15,7 +15,7 @@ variables:
   # 差分検出のためフルコミット履歴を取得
   GIT_DEPTH: "0"
 
-# Pythonの構文チェック(py_compileで対象ディレクトリ全ての.pyファイルをコンパイルしてエラー検出)
+# Pythonの構文チェック(LAMBDA_ENTRY_FILEが置かれている各ディレクトリの.pyファイルをコンパイルしてエラー検出)
 syntax_check:
   stage: syntax_check
   image: python:${PYTHON_VERSION}-slim
@@ -23,7 +23,8 @@ syntax_check:
     - if: '$CI_COMMIT_BRANCH == "master"'
   script:
     - |
-      for dir in ${LAMBDA_SRC_PATTERN}/; do
+      for entry in $(find . -name "${LAMBDA_ENTRY_FILE}"); do
+        dir=$(dirname "${entry}")
         echo "Checking Python syntax in ${dir}..."
         python -m py_compile $(find "${dir}" -name "*.py")
       done
@@ -39,20 +40,28 @@ package:
   script:
     - apt-get update -qq && apt-get install -y -qq zip git
     - mkdir -p "${DIST_DIR}"
+    - DIST_DIR_ABS="$(pwd)/${DIST_DIR}"
     - |
+      LAMBDA_DIRS=$(find . -name "${LAMBDA_ENTRY_FILE}" -exec dirname {} \; | sed 's|^\./||')
       if [ -z "${CI_COMMIT_BEFORE_SHA}" ] || [ "${CI_COMMIT_BEFORE_SHA}" = "0000000000000000000000000000000000000000" ]; then
         echo "比較対象の前回コミットがないため、全Lambdaディレクトリをパッケージします。"
-        CHANGED_DIRS=$(for dir in ${LAMBDA_SRC_PATTERN}/; do basename "${dir}"; done)
+        CHANGED_DIRS="${LAMBDA_DIRS}"
       else
-        CHANGED_DIRS=$(git diff --name-only "${CI_COMMIT_BEFORE_SHA}" "${CI_COMMIT_SHA}" -- ${LAMBDA_SRC_PATTERN} | cut -d/ -f1 | sort -u)
+        CHANGED_DIRS=""
+        for dir in ${LAMBDA_DIRS}; do
+          if [ -n "$(git diff --name-only "${CI_COMMIT_BEFORE_SHA}" "${CI_COMMIT_SHA}" -- "${dir}")" ]; then
+            CHANGED_DIRS="${CHANGED_DIRS} ${dir}"
+          fi
+        done
       fi
       if [ -z "${CHANGED_DIRS}" ]; then
         echo "Lambdaディレクトリに変更がないため、パッケージをスキップします。"
         exit 0
       fi
-      for name in ${CHANGED_DIRS}; do
-        echo "Packaging ${name} into ${DIST_DIR}/${name}.zip..."
-        (cd "${name}" && zip -r "../${DIST_DIR}/${name}.zip" .)
+      for dir in ${CHANGED_DIRS}; do
+        name=$(basename "${dir}")
+        echo "Packaging ${dir} into ${DIST_DIR}/${name}.zip..."
+        (cd "${dir}" && zip -r "${DIST_DIR_ABS}/${name}.zip" .)
       done
   artifacts:
     paths:
